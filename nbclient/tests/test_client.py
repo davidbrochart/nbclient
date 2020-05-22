@@ -26,7 +26,7 @@ from jupyter_client.kernelspec import KernelSpecManager
 from nbconvert.filters import strip_ansi
 from testpath import modified_env
 from ipython_genutils.py3compat import string_types
-from pebble import ProcessPool
+import concurrent.futures
 
 from queue import Empty
 from unittest.mock import MagicMock, Mock
@@ -80,6 +80,12 @@ def run_notebook(filename, opts, resources=None):
         output_nb = executor.execute()
 
     return input_nb, output_nb
+
+
+def run_notebook_wrapper(args):
+    # since concurrent.futures.ProcessPoolExecutor doesn't have starmap,
+    # we need to unpack the arguments
+    return run_notebook(*args)
 
 
 async def async_run_notebook(filename, opts, resources=None):
@@ -301,13 +307,8 @@ def test_many_parallel_notebooks(capfd):
     # run once, to trigger creating the original context
     run_notebook(input_file, opts, res)
 
-    with ProcessPool(max_workers=2) as pool:
-        futures = [
-            pool.schedule(run_notebook, args=(input_file, opts, res))
-            for i in range(8)
-        ]
-        for index, future in enumerate(futures):
-            future.result()
+    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+        executor.map(run_notebook_wrapper, [(input_file, opts, res) for i in range(8)])
 
     captured = capfd.readouterr()
     assert captured.err == ""
@@ -594,17 +595,39 @@ while True: continue
             resources=self.build_resources(),
         )
 
-        executor.execute()
+        executor.execute(cleanup_kc=False)
         # we didn't ask to reset the kernel client, a new one must have been created
         kc = executor.kc
         assert kc is not None
-        executor.execute()
+
+        executor.execute(cleanup_kc=False)
         # we didn't ask to reset the kernel client, the previously created one must have been reused
         assert kc == executor.kc
-        executor.execute(reset_kc=True)
+
+        executor.execute(reset_kc=True, cleanup_kc=False)
         # we asked to reset the kernel client, the previous one must have been cleaned up,
-        # a new one must have been created and also cleaned up
+        # a new one must have been created
+        assert kc != executor.kc
+
+    def test_cleanup_kernel_client(self):
+        filename = os.path.join(current_dir, 'files', 'HelloWorld.ipynb')
+
+        with io.open(filename) as f:
+            input_nb = nbformat.read(f, 4)
+
+        executor = NotebookClient(
+            input_nb,
+            resources=self.build_resources(),
+        )
+
+        executor.execute()
+        # we asked to cleanup the kernel client (default is True)
         assert executor.kc is None
+
+        executor.execute(cleanup_kc=False)
+        # we didn't ask to reset the kernel client
+        # a new one must have been created and should still be available
+        assert executor.kc is not None
 
     def test_custom_kernel_manager(self):
         from .fake_kernelmanager import FakeCustomKernelManager
